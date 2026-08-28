@@ -146,12 +146,23 @@ fn reasoning_config(
     let supported = config
         .model_profile(model)
         .is_some_and(|profile| profile.reasoning_enabled);
-    let effort = config
+    // Effort precedence mirrors the Chat path: client-declared
+    // output_config.effort resolved against the provider's supported tiers;
+    // legacy fallback stays effort_map["max"].
+    let provider = config
         .model_profile(model)
-        .and_then(|profile| config.provider_config(&profile.provider))
-        .and_then(|provider| provider.effort_map.get("max"))
-        .cloned()
-        .unwrap_or_else(|| "max".to_string());
+        .and_then(|profile| config.provider_config(&profile.provider));
+    let effort = match provider.as_ref().map(|prov| {
+        crate::reasoning::apply_effort::resolve_effort(
+            crate::anthropic::converter::inbound_effort(req)
+                .as_deref()
+                .unwrap_or("max"),
+            prov,
+        )
+    }) {
+        Some(resolved) => resolved,
+        None => "max".to_string(),
+    };
     let summary = config
         .model_profile(model)
         .and_then(|profile| config.provider_config(&profile.provider))

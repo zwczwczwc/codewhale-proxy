@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::openai::types::{
     ChatCompletionRequest, DeepSeekThinking, OpenAiFunction, OpenAiTool, StreamOptions,
 };
+use crate::reasoning::apply_effort::resolve_effort;
 use crate::reasoning::build_messages::build_chat_messages_with_reasoning;
 use crate::reasoning::prefix::compute_prefix_fingerprint;
 use crate::reasoning::requires::requires_reasoning_content;
@@ -15,6 +16,25 @@ use serde_json::Value;
 /// Unknown models fall back to config's default_model.
 pub fn map_model_to_upstream_for_responses(model: &str, config: &Config) -> String {
     map_model_to_upstream(model, config)
+}
+
+/// Extract the client's effort intent from the llm-gateway-protocol
+/// `output_config.effort` field (interactive-mode Claude Code wire).
+///
+/// Only canonical effort words are accepted; anything else (absent, null,
+/// free-form strings) yields `None` so the request falls back to the default
+/// path unchanged. The object itself is never forwarded upstream.
+pub(crate) fn inbound_effort(req: &MessagesRequest) -> Option<String> {
+    let oc = req.output_config.as_ref()?;
+    let e = oc.get("effort")?.as_str()?;
+    const KNOWN: &[&str] = &[
+        "off", "disabled", "none", "false", "minimal", "low", "medium", "high", "xhigh", "max",
+    ];
+    if KNOWN.contains(&e) {
+        Some(e.to_string())
+    } else {
+        None
+    }
 }
 
 fn map_model_to_upstream(model: &str, config: &Config) -> String {
@@ -284,25 +304,31 @@ pub(crate) fn convert_request_with_relocation(
 
     if let Some(thinking) = &req.thinking {
         if thinking.is_enabled() {
-            // Default all thinking-enabled requests to xhigh effort, unless an
-            // explicit Phase 4a pin overrides it (Kimi official only).
-            let effort = pinned_effort.unwrap_or("xhigh");
+            // Effort precedence: explicit Phase 4a pin (Kimi official only)
+            // > client-declared output_config.effort > legacy default xhigh.
+            let effort = pinned_effort
+                .map(|s| s.to_string())
+                .or_else(|| inbound_effort(req))
+                .unwrap_or_else(|| "xhigh".to_string());
             let effort = if is_gpt_provider && has_tools {
-                "off"
+                "off".to_string()
             } else {
                 effort
             };
-            apply_effort_direct(&mut openai_req, effort, config);
+            apply_effort_direct(&mut openai_req, &effort, config);
         } else {
             apply_effort_direct(&mut openai_req, "off", config);
         }
     } else if is_reasoning_model {
         let effort = if is_gpt_provider && has_tools {
-            "off"
+            "off".to_string()
         } else {
-            pinned_effort.unwrap_or("xhigh")
+            pinned_effort
+                .map(|s| s.to_string())
+                .or_else(|| inbound_effort(req))
+                .unwrap_or_else(|| "xhigh".to_string())
         };
-        apply_effort_direct(&mut openai_req, effort, config);
+        apply_effort_direct(&mut openai_req, &effort, config);
     }
 
     // GLM-5.2: 保留式思考需要 clear_thinking=false 在 thinking 对象内
@@ -427,11 +453,7 @@ fn apply_effort_direct(req: &mut ChatCompletionRequest, effort: &str, config: &C
         _ => {
             if let Some(prov) = provider {
                 // Map effort through provider's effort_map; default to "high" for unknown levels
-                let mapped = prov
-                    .effort_map
-                    .get(effort)
-                    .cloned()
-                    .unwrap_or_else(|| "high".to_string());
+                let mapped = resolve_effort(effort, prov);
                 req.reasoning_effort = Some(mapped);
 
                 // Set thinking.type = enabled if provider supports it
@@ -651,6 +673,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -684,6 +707,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -717,6 +741,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -745,6 +770,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -772,6 +798,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -802,6 +829,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -835,6 +863,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -871,6 +900,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -902,6 +932,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -929,6 +960,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -961,6 +993,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -1008,6 +1041,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -1038,6 +1072,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -1066,6 +1101,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -1095,6 +1131,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -1142,6 +1179,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -1190,6 +1228,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -1226,6 +1265,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -1277,6 +1317,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result1 = convert_request(&req, &config).unwrap();
@@ -1358,6 +1399,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         };
 
         let result = convert_request(&req, &config).unwrap();
@@ -1442,6 +1484,7 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            output_config: None,
         }
     }
 
@@ -1737,6 +1780,94 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn inbound_output_config_effort_overrides_default_xhigh() {
+        // Effort passthrough: client-declared output_config.effort must reach
+        // the upstream wire (deepseek map: xhigh→max, medium→high).
+        let config = test_config();
+        let mut req = kimi_req_with_thinking_budget(Some(16000));
+        req.model = "deepseek-v4-pro".to_string();
+        req.output_config = Some(serde_json::json!({"effort": "medium"}));
+        let result = convert_request_with_relocation(&req, &config, false).unwrap();
+        assert_eq!(result.reasoning_effort.as_deref(), Some("high"));
+
+        let mut req = kimi_req_with_thinking_budget(Some(16000));
+        req.model = "deepseek-v4-pro".to_string();
+        req.output_config = Some(serde_json::json!({"effort": "xhigh"}));
+        let result = convert_request_with_relocation(&req, &config, false).unwrap();
+        assert_eq!(result.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn pinned_effort_beats_inbound_output_config() {
+        // Precedence: explicit Phase 4a pin > inbound output_config.effort.
+        let config = kimi_pinned_config(Some("low"));
+        let mut req = kimi_req_with_thinking_budget(Some(16000));
+        req.output_config = Some(serde_json::json!({"effort": "max"}));
+        let result = convert_request_with_relocation(&req, &config, false).unwrap();
+        assert_eq!(
+            result.reasoning_effort.as_deref(),
+            Some("low"),
+            "pin must win over inbound effort"
+        );
+    }
+
+    #[test]
+    fn inbound_effort_unknown_word_falls_back_to_default_xhigh() {
+        // Garbage effort values must be ignored (fail-closed to legacy path).
+        let config = test_config();
+        let mut req = kimi_req_with_thinking_budget(Some(16000));
+        req.model = "deepseek-v4-pro".to_string();
+        req.output_config = Some(serde_json::json!({"effort": "turbo"}));
+        let result = convert_request_with_relocation(&req, &config, false).unwrap();
+        assert_eq!(result.reasoning_effort.as_deref(), Some("max"));
+
+        // Non-string effort (e.g. number) is ignored too.
+        let mut req = kimi_req_with_thinking_budget(Some(16000));
+        req.model = "deepseek-v4-pro".to_string();
+        req.output_config = Some(serde_json::json!({"effort": 3}));
+        let result = convert_request_with_relocation(&req, &config, false).unwrap();
+        assert_eq!(result.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn inbound_effort_absent_output_config_keeps_legacy_default() {
+        // No output_config at all → legacy xhigh→max, byte-identical.
+        let config = test_config();
+        let req = kimi_req_with_thinking_budget(Some(16000));
+        let mut req = req;
+        req.model = "deepseek-v4-pro".to_string();
+        let result = convert_request_with_relocation(&req, &config, false).unwrap();
+        assert_eq!(result.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn inbound_effort_does_not_apply_when_thinking_disabled() {
+        // thinking disabled → off path; output_config.effort must NOT resurrect it.
+        let config = test_config();
+        let mut req = kimi_req_with_thinking_disabled();
+        req.model = "deepseek-v4-pro".to_string();
+        req.output_config = Some(serde_json::json!({"effort": "max"}));
+        let result = convert_request_with_relocation(&req, &config, false).unwrap();
+        assert_eq!(result.reasoning_effort, None);
+    }
+
+    #[test]
+    fn inbound_effort_does_not_change_prefix_fingerprint_inputs() {
+        // The effort value lives in the request control area, not in
+        // instructions/tools — but the prefix fingerprint must stay stable
+        // for identical requests regardless of output_config presence.
+        let config = test_config();
+        let mut a = kimi_req_with_thinking_budget(Some(16000));
+        a.model = "deepseek-v4-pro".to_string();
+        let mut b = a.clone();
+        b.output_config = Some(serde_json::json!({"effort": "low"}));
+        let ra = convert_request_with_relocation(&a, &config, false).unwrap();
+        let rb = convert_request_with_relocation(&b, &config, false).unwrap();
+        // Different efforts on the wire (max vs low) — that is the feature.
+        assert_ne!(ra.reasoning_effort, rb.reasoning_effort);
     }
 
     #[test]
