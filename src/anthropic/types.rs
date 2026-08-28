@@ -22,6 +22,12 @@ pub struct MessagesRequest {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
+    /// Anthropic llm-gateway-protocol: client effort intent lives in
+    /// `output_config.effort` (interactive mode). Parsed loosely as a JSON
+    /// value; only the "effort" string is consumed (converter::inbound_effort)
+    /// and the object is never forwarded upstream.
+    #[serde(default)]
+    pub output_config: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
