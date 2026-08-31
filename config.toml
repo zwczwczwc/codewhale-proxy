@@ -2,7 +2,7 @@
 # 生产配置
 
 [models]
-default = "deepseek-v4-pro"
+default = "glm-5.3-flash"
 
 [models.mapping]
 # L1: Opus → glm-5.3（2026-08-21 分层：方案设计层）
@@ -10,16 +10,34 @@ default = "deepseek-v4-pro"
 "claude-opus-4-6" = "glm-5.3"
 "claude-opus-4-5" = "glm-5.3"
 "claude-opus-4" = "glm-5.3"
-# L2: Sonnet → deepseek-v4-flash（2026-08-21 分层：主要承接层，sonnet=haiku=flash max）
-"claude-sonnet-4-7" = "deepseek-v4-flash"
-"claude-sonnet-4-6" = "deepseek-v4-flash"
-"claude-sonnet-4-5" = "deepseek-v4-flash"
-"claude-sonnet-4"   = "deepseek-v4-flash"
-"claude-3-5-sonnet" = "deepseek-v4-flash"
-# L3: Haiku → deepseek-v4-flash (implement/debug)
-"claude-haiku-4-5" = "deepseek-v4-flash"
-"claude-haiku-4" = "deepseek-v4-flash"
-"claude-3-haiku" = "deepseek-v4-flash"
+# L2: Sonnet → glm-5.3-flash（2026-08-28 替换：AA 57 vs 50，成本更低）
+# 覆盖所有 sonnet 变体：版本号系列 + 带日期后缀的全名
+"claude-sonnet-5"   = "glm-5.3-flash"
+"claude-sonnet-4-7" = "glm-5.3-flash"
+"claude-sonnet-4-6" = "glm-5.3-flash"
+"claude-sonnet-4-5" = "glm-5.3-flash"
+"claude-sonnet-4-1" = "glm-5.3-flash"
+"claude-sonnet-4-0" = "glm-5.3-flash"
+"claude-sonnet-4"   = "glm-5.3-flash"
+"claude-sonnet-3-7" = "glm-5.3-flash"
+"claude-3-7-sonnet" = "glm-5.3-flash"
+"claude-3-5-sonnet" = "glm-5.3-flash"
+"claude-3-5-sonnet-20241022" = "glm-5.3-flash"
+"claude-3-5-sonnet-20240620" = "glm-5.3-flash"
+"claude-sonnet" = "glm-5.3-flash"
+# L3: Haiku → glm-5.3-flash (implement/debug)
+"claude-haiku-4-5" = "glm-5.3-flash"
+"claude-haiku-4-1" = "glm-5.3-flash"
+"claude-haiku-4-0" = "glm-5.3-flash"
+"claude-haiku-4" = "glm-5.3-flash"
+"claude-3-5-haiku" = "glm-5.3-flash"
+"claude-3-5-haiku-20241022" = "glm-5.3-flash"
+"claude-3-haiku" = "glm-5.3-flash"
+"claude-3-haiku-20240307" = "glm-5.3-flash"
+"claude-haiku" = "glm-5.3-flash"
+# 混合/简写别名（Claude Code opusplan = plan:opus + exec:sonnet）
+"claude-opusplan" = "glm-5.3-flash"
+"opusplan" = "glm-5.3-flash"
 # L4: Fable → kimi-k3 (moonshot)
 "fable-5" = "kimi-k3"
 
