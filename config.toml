@@ -48,7 +48,7 @@ reasoning_field = "reasoning_content"
 thinking_param = "thinking"
 thinking_type_enabled = "enabled"
 thinking_type_disabled = "disabled"
-disable_thinking = false
+disable_thinking = true
 effort_param = "reasoning_effort"
 
 [providers.deepseek.effort_map]
@@ -105,7 +105,7 @@ reasoning_field = "reasoning_content"
 thinking_param = "thinking"
 thinking_type_enabled = "enabled"
 thinking_type_disabled = "disabled"
-disable_thinking = false
+disable_thinking = true
 effort_param = "reasoning_effort"
 
 [providers.glm.effort_map]
@@ -124,7 +124,7 @@ reasoning_field_alt = []
 # thinking_param 不设 → effort=other 时不发 thinking 字段
 thinking_type_enabled = "enabled"
 thinking_type_disabled = "disabled"
-disable_thinking = false
+disable_thinking = true
 effort_param = "reasoning_effort"
 
 [providers.gpt.effort_map]
