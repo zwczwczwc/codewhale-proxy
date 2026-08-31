@@ -85,6 +85,21 @@ replay = "full_assistant"
 history = "append_only"
 relocate = "split_tail"
 
+[providers.glm-flash]
+reasoning_field = "reasoning_content"
+thinking_param = "thinking"
+thinking_type_enabled = "enabled"
+thinking_type_disabled = "disabled"
+disable_thinking = true
+effort_param = "reasoning_effort"
+
+[providers.glm-flash.effort_map]
+low = "low"
+medium = "high"
+high = "high"
+max = "max"
+xhigh = "max"
+
 [providers.glm]
 reasoning_field = "reasoning_content"
 thinking_param = "thinking"
@@ -139,6 +154,14 @@ aliases = []
 [[model_profiles]]
 name = "glm-5.3"
 provider = "glm"
+reasoning_enabled = true
+reasoning_replay = false
+toolcall_requires_reasoning = false
+aliases = []
+
+[[model_profiles]]
+name = "glm-5.3-flash"
+provider = "glm-flash"
 reasoning_enabled = true
 reasoning_replay = false
 toolcall_requires_reasoning = false
