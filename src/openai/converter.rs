@@ -101,6 +101,37 @@ fn map_finish_reason(fr: &str) -> String {
     }
 }
 
+/// Empty-text response guard mode (CC_PROXY_EMPTY_TEXT_GUARD).
+///
+/// When upstream reaches a terminal state with 0 text blocks and 0 tool_use
+/// blocks, the converted response would otherwise be a silent empty
+/// `message_stop` — which clients (e.g. Claude Code compaction) treat as a
+/// success and then fail downstream with "summarization produced empty
+/// response". This guard makes the anomaly observable:
+///
+/// - `Off` — no detection, legacy behavior (silent empty message_stop).
+/// - `Warn` — detect + structured log, but forward the empty response unchanged
+///   (observation period, default).
+/// - `Enforce` — detect and emit a stream `error` event instead of the empty
+///   message_delta/message_stop (fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmptyTextGuard {
+    Off,
+    Warn,
+    Enforce,
+}
+
+impl EmptyTextGuard {
+    pub fn from_env() -> Self {
+        match std::env::var("CC_PROXY_EMPTY_TEXT_GUARD").as_deref() {
+            Ok("off") => EmptyTextGuard::Off,
+            Ok("enforce") => EmptyTextGuard::Enforce,
+            // Default: warn — observation period before fail-closed.
+            _ => EmptyTextGuard::Warn,
+        }
+    }
+}
+
 /// SSE stream state machine — tracks block transitions during streaming.
 pub struct SseStateMachine {
     content_index: u32,
@@ -108,6 +139,13 @@ pub struct SseStateMachine {
     thinking_started: bool,
     tool_indices: std::collections::HashMap<u32, u32>,
     is_reasoning_model: bool,
+    /// True once a non-whitespace text delta has been emitted in this stream.
+    /// Used by the empty-text guard to distinguish "upstream completed with no
+    /// text at all" from a normal response. Reset per stream (new instance).
+    emitted_text: bool,
+    /// Empty-text guard mode for this stream (read once from env at
+    /// process_stream top; tests may set explicitly).
+    empty_text_guard: EmptyTextGuard,
     /// Primary field name for reasoning content (from ProviderConfig.reasoning_field)
     reasoning_field: String,
     /// Alternative field names to try if primary is empty/missing
@@ -146,6 +184,8 @@ impl SseStateMachine {
             thinking_started: false,
             tool_indices: std::collections::HashMap::new(),
             is_reasoning_model,
+            emitted_text: false,
+            empty_text_guard: EmptyTextGuard::Warn,
             reasoning_field,
             reasoning_field_alt,
             current_text: String::new(),
@@ -158,6 +198,19 @@ impl SseStateMachine {
             cache_policy,
             raw_read_tokens: None,
         }
+    }
+
+    /// Set the empty-text guard mode for this stream (read from env by the
+    /// process_stream caller; explicit setter keeps `new()` signature stable
+    /// for the many test construction sites).
+    pub fn set_empty_text_guard(&mut self, guard: EmptyTextGuard) {
+        self.empty_text_guard = guard;
+    }
+
+    /// Current empty-text guard mode (test helper).
+    #[cfg(test)]
+    pub fn empty_text_guard(&self) -> EmptyTextGuard {
+        self.empty_text_guard
     }
 
     /// Process a single SSE delta chunk. Returns Vec of SSE events to emit.
@@ -254,6 +307,11 @@ impl SseStateMachine {
                     self.current_text = String::new();
                 }
                 self.current_text.push_str(text);
+                // Mark that real (non-whitespace) text has been emitted — this
+                // stream is NOT an empty-text response.
+                if !text.trim().is_empty() {
+                    self.emitted_text = true;
+                }
                 events.push(SseEvent::ContentBlockDelta {
                     index: self.content_index,
                     delta: ContentBlockDeltaData::TextDelta { text: text.clone() },
@@ -358,6 +416,46 @@ impl SseStateMachine {
         output_tokens: Option<u32>,
         usage: Option<&crate::openai::types::Usage>,
     ) -> Vec<SseEvent> {
+        // Empty-text guard: if upstream reached a terminal state but emitted no
+        // text and no tool_use blocks, the converted Anthropic response would be
+        // a silent empty message_stop — which clients (Claude Code compaction)
+        // treat as success and then fail downstream. Make it observable.
+        if !self.emitted_text && self.tool_indices.is_empty() {
+            match self.empty_text_guard {
+                EmptyTextGuard::Off => {}
+                EmptyTextGuard::Warn => {
+                    tracing::warn!(
+                        stop_reason = ?stop_reason,
+                        output_tokens = ?output_tokens,
+                        thinking_chars = self.current_thinking.len(),
+                        "upstream completed with 0 text blocks and 0 tool_use blocks \
+                         (empty response); WARN mode — forwarding unchanged"
+                    );
+                }
+                EmptyTextGuard::Enforce => {
+                    let reason = stop_reason.unwrap_or("(none)");
+                    tracing::warn!(
+                        stop_reason = ?stop_reason,
+                        output_tokens = ?output_tokens,
+                        thinking_chars = self.current_thinking.len(),
+                        "upstream completed with 0 text blocks and 0 tool_use blocks \
+                         (empty response); ENFORCE mode — emitting stream error"
+                    );
+                    return vec![SseEvent::Error {
+                        error: crate::anthropic::types::ErrorData {
+                            error_type: "stream_error".to_string(),
+                            message: format!(
+                                "upstream returned empty content (finish_reason={reason}, \
+                                 output_tokens={}, thinking_chars={})",
+                                output_tokens.unwrap_or(0),
+                                self.current_thinking.len(),
+                            ),
+                        },
+                    }];
+                }
+            }
+        }
+
         let mut events = Vec::new();
 
         // Close thinking block
@@ -974,6 +1072,145 @@ mod tests {
         assert_ne!(
             su["input_tokens"], 100,
             "message_start must not carry terminal usage: {start_value}"
+        );
+    }
+
+    // ============ Empty-text response guard (plan-B v1.1) ============
+    // Upstream can reach a terminal state (finish_reason present) with 0 text
+    // blocks and 0 tool_use blocks — e.g. glm-5.3 with effort=max burns the whole
+    // output budget on reasoning. Previously this became a silent empty
+    // message_stop; Claude Code compaction then failed with "summarization
+    // produced empty response". Guard modes: Off (legacy), Warn (log only,
+    // default), Enforce (emit stream error instead of empty message_stop).
+
+    #[test]
+    fn empty_text_guard_default_is_warn() {
+        let sm = SseStateMachine::new(false, "reasoning_content".into(), vec![], None);
+        assert_eq!(sm.empty_text_guard(), EmptyTextGuard::Warn);
+    }
+
+    #[test]
+    fn empty_text_guard_enforce_empty_returns_error_not_message_stop() {
+        let mut sm = SseStateMachine::new(false, "reasoning_content".into(), vec![], None);
+        sm.set_empty_text_guard(EmptyTextGuard::Enforce);
+        // No text, no tool_use, terminal with stop — the compaction failure shape.
+        let events = sm.finalize(Some("stop"), Some(20), None);
+        assert_eq!(
+            events.len(),
+            1,
+            "enforce must emit only the error frame: {events:?}"
+        );
+        match &events[0] {
+            SseEvent::Error { error } => {
+                assert_eq!(error.error_type, "stream_error");
+                assert!(
+                    error.message.contains("upstream returned empty content"),
+                    "message must be diagnostic: {}",
+                    error.message
+                );
+                assert!(error.message.contains("finish_reason=stop"));
+            }
+            other => panic!("expected SseEvent::Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_text_guard_enforce_length_with_thinking_returns_error() {
+        // The suspected real failure shape: reasoning-only + finish_reason=length.
+        let mut sm = SseStateMachine::new(true, "reasoning_content".into(), vec![], None);
+        sm.set_empty_text_guard(EmptyTextGuard::Enforce);
+        let thinking: ChatDelta = serde_json::from_value(serde_json::json!({
+            "reasoning_content": "deep reasoning consumes the whole budget"
+        }))
+        .unwrap();
+        let _ = sm.process_delta(&thinking, None);
+        let events = sm.finalize(Some("length"), Some(64000), None);
+        assert_eq!(
+            events.len(),
+            1,
+            "enforce must emit only the error frame: {events:?}"
+        );
+        match &events[0] {
+            SseEvent::Error { error } => {
+                assert!(
+                    error.message.contains("finish_reason=length"),
+                    "must report length terminal: {}",
+                    error.message
+                );
+            }
+            other => panic!("expected SseEvent::Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_text_guard_enforce_with_text_forwards_normally() {
+        // Normal text response must be untouched by the guard.
+        let mut sm = SseStateMachine::new(false, "reasoning_content".into(), vec![], None);
+        sm.set_empty_text_guard(EmptyTextGuard::Enforce);
+        let text: ChatDelta = serde_json::from_value(serde_json::json!({
+            "content": "hello world"
+        }))
+        .unwrap();
+        let _ = sm.process_delta(&text, None);
+        let events = sm.finalize(Some("stop"), Some(10), None);
+        assert!(
+            matches!(events.last(), Some(SseEvent::MessageStop)),
+            "text response must end with message_stop: {events:?}"
+        );
+        assert!(!events.iter().any(|e| matches!(e, SseEvent::Error { .. })));
+    }
+
+    #[test]
+    fn empty_text_guard_enforce_with_tool_use_forwards_normally() {
+        // Pure tool_use (no text) is a legitimate response and must be allowed.
+        let mut sm = SseStateMachine::new(false, "reasoning_content".into(), vec![], None);
+        sm.set_empty_text_guard(EmptyTextGuard::Enforce);
+        let tool: ChatDelta = serde_json::from_value(serde_json::json!({
+            "tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {"name": "get_weather", "arguments": "{}"}
+            }]
+        }))
+        .unwrap();
+        let _ = sm.process_delta(&tool, None);
+        let events = sm.finalize(Some("tool_calls"), Some(10), None);
+        assert!(
+            matches!(events.last(), Some(SseEvent::MessageStop)),
+            "tool_use response must end with message_stop: {events:?}"
+        );
+        assert!(!events.iter().any(|e| matches!(e, SseEvent::Error { .. })));
+    }
+
+    #[test]
+    fn empty_text_guard_off_and_warn_forward_empty_unchanged() {
+        // Off and Warn must NOT change the wire — empty response forwarded as-is.
+        for guard in [EmptyTextGuard::Off, EmptyTextGuard::Warn] {
+            let mut sm = SseStateMachine::new(false, "reasoning_content".into(), vec![], None);
+            sm.set_empty_text_guard(guard);
+            let events = sm.finalize(Some("stop"), Some(20), None);
+            assert!(
+                matches!(events.last(), Some(SseEvent::MessageStop)),
+                "{guard:?} must forward empty response with message_stop: {events:?}"
+            );
+            assert!(!events.iter().any(|e| matches!(e, SseEvent::Error { .. })));
+        }
+    }
+
+    #[test]
+    fn empty_text_guard_whitespace_only_text_counts_as_empty() {
+        // Whitespace-only content must be treated as empty (matches CC's trim
+        // on extraction), so the guard still fires in Enforce mode.
+        let mut sm = SseStateMachine::new(false, "reasoning_content".into(), vec![], None);
+        sm.set_empty_text_guard(EmptyTextGuard::Enforce);
+        let ws: ChatDelta = serde_json::from_value(serde_json::json!({
+            "content": "   \n\t  "
+        }))
+        .unwrap();
+        let _ = sm.process_delta(&ws, None);
+        let events = sm.finalize(Some("stop"), Some(5), None);
+        assert!(
+            matches!(events[0], SseEvent::Error { .. }),
+            "whitespace-only must be treated as empty in enforce: {events:?}"
         );
     }
 }
