@@ -253,6 +253,53 @@ async fn handle_messages(
                     &reasoning_field_alt,
                     cache_policy.as_ref(),
                 );
+                // Empty-text guard (non-streaming): if upstream completed with no
+                // text and no tool_use blocks, return a 5xx Anthropic error instead
+                // of a 200 with empty content — Claude Code's SDK auto-retries
+                // HTTP 5xx (bounded, maxRetries=2).
+                let has_text_or_tool = anthropic_resp.content.iter().any(|block| {
+                    matches!(
+                        block,
+                        crate::anthropic::types::ResponseContentBlock::Text { .. }
+                            | crate::anthropic::types::ResponseContentBlock::ToolUse { .. }
+                    )
+                });
+                if !has_text_or_tool && anthropic_resp.stop_reason.is_some() {
+                    match crate::openai::converter::EmptyTextGuard::from_env() {
+                        crate::openai::converter::EmptyTextGuard::Off => {}
+                        crate::openai::converter::EmptyTextGuard::Warn => {
+                            tracing::warn!(
+                                stop_reason = ?anthropic_resp.stop_reason,
+                                "non-streaming upstream completed with 0 text and 0 tool_use \
+                                 blocks (empty response); WARN mode — forwarding unchanged"
+                            );
+                        }
+                        crate::openai::converter::EmptyTextGuard::Enforce => {
+                            let reason = anthropic_resp
+                                .stop_reason
+                                .clone()
+                                .unwrap_or_else(|| "(none)".to_string());
+                            tracing::warn!(
+                                stop_reason = ?reason,
+                                "non-streaming upstream completed with 0 text and 0 tool_use \
+                                 blocks (empty response); ENFORCE mode — returning HTTP 502"
+                            );
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                Json(serde_json::json!({
+                                    "type": "error",
+                                    "error": {
+                                        "type": "api_error",
+                                        "message": format!(
+                                            "upstream returned empty content (finish_reason={reason})"
+                                        ),
+                                    }
+                                })),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
                 (StatusCode::OK, Json(anthropic_resp)).into_response()
             }
             Err(e) => {

@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::anthropic::types::SseEvent;
-use crate::openai::converter::SseStateMachine;
+use crate::openai::converter::{EmptyTextGuard, SseStateMachine};
 
 /// Convert an SseEvent to an axum SSE Event.
 pub fn sse_event_to_axum(event: &SseEvent) -> Event {
@@ -71,6 +71,10 @@ pub fn process_stream(
             reasoning_field_alt,
             cache_policy.clone(),
         );
+        // Empty-text guard: read once here (top of stream processing), pass in
+        // explicitly — never read env inside finalize (process-global state,
+        // untestable). See SseStateMachine::finalize.
+        state_machine.set_empty_text_guard(EmptyTextGuard::from_env());
 
         // Send message_start first (audit defect 3.1)
         let msg_start = state_machine.message_start(&model, &msg_id);
